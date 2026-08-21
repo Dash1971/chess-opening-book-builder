@@ -1,6 +1,6 @@
 # Chess Opening Book Builder
 
-Build rating-targeted [Polyglot](https://www.chessprogramming.org/Polyglot)
+Build rating-targeted [Polyglot](https://www.chessprogramming.org/PolyGlot)
 opening books from real games in the public
 [Lichess database](https://database.lichess.org/).
 
