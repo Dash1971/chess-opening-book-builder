@@ -40,6 +40,8 @@ Examples:
   ./build-books.sh --preset maia3-1600-rapid
   ./build-books.sh --defaults --month 2025-06 --size-gb 10
   ./build-books.sh --defaults --source /data/lichess_games.pgn.zst --month 2025-06
+  ./build-books.sh --defaults --source /data/lichess_games.pgn.zst \
+    --month 2025-06 --size-gb 10
   ./build-books.sh --defaults --source https://example.org/games.pgn.zst \
     --month 2025-06 --size-gb 5
 EOF
@@ -217,6 +219,7 @@ file_size() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
 
 SOURCE_IS_LOCAL=0
 SOURCE_REMOTE_FULL=0
+SOURCE_LOCAL_PREFIX=0
 FULL_ARCHIVE=0
 if [[ -z "$SOURCE" ]]; then
     SOURCE_URL="https://database.lichess.org/standard/lichess_db_standard_rated_${MONTH}.pgn.zst"
@@ -243,15 +246,32 @@ else
     CHUNK="$SOURCE_DIR/$(basename "$SOURCE")"
     SOURCE_URL="file://$CHUNK"
     SOURCE_IS_LOCAL=1
-    FULL_ARCHIVE=1
-    MAX_BYTES=$(file_size "$CHUNK")
+    LOCAL_SOURCE_BYTES=$(file_size "$CHUNK")
+    if [[ $SIZE_GB_SET -eq 1 ]]; then
+        if [[ $MAX_BYTES -gt $LOCAL_SOURCE_BYTES ]]; then
+            echo "Requested prefix is larger than the local source file" >&2
+            exit 1
+        fi
+        if [[ $MAX_BYTES -lt $LOCAL_SOURCE_BYTES ]]; then
+            SOURCE_LOCAL_PREFIX=1
+        else
+            FULL_ARCHIVE=1
+        fi
+    else
+        FULL_ARCHIVE=1
+        MAX_BYTES=$LOCAL_SOURCE_BYTES
+    fi
 fi
 
 PART="$CHUNK.part"
 SEGMENT="$CHUNK.segment"
 
 if [[ $SOURCE_IS_LOCAL -eq 1 ]]; then
-    printf 'Using local archive: %s (%s bytes)\n' "$CHUNK" "$MAX_BYTES"
+    if [[ $SOURCE_LOCAL_PREFIX -eq 1 ]]; then
+        printf 'Using first %s GiB of local archive: %s\n' "$MAX_GB" "$CHUNK"
+    else
+        printf 'Using local archive: %s (%s bytes)\n' "$CHUNK" "$MAX_BYTES"
+    fi
 elif [[ $SOURCE_REMOTE_FULL -eq 1 ]]; then
     if [[ -f "$CHUNK" ]]; then
         MAX_BYTES=$(file_size "$CHUNK")
@@ -313,7 +333,16 @@ else
     mv "$PART" "$CHUNK"
 fi
 
-if ! "${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>/dev/null | head -c 1000 | grep -q "\[Event"; then
+stream_source() {
+    if [[ $SOURCE_LOCAL_PREFIX -eq 1 ]]; then
+        head -c "$MAX_BYTES" "$CHUNK"
+    else
+        cat "$CHUNK"
+    fi
+}
+
+if ! "${ZSTDCAT_CMD[@]}" < <(stream_source) 2>/dev/null \
+    | head -c 1000 | grep -q "\[Event"; then
     echo "Archive prefix does not begin with valid PGN data" >&2
     exit 1
 fi
@@ -339,7 +368,7 @@ if [[ $DOWNLOAD_ONLY -eq 1 ]]; then
     VALIDATION_LOG=$(mktemp "${TMPDIR:-/tmp}/chess-opening-book-builder-validation.XXXXXX")
     trap 'rm -f "$VALIDATION_LOG"' EXIT HUP INT TERM
     set +e
-    "${ZSTDCAT_CMD[@]}" < "$CHUNK" > /dev/null 2>"$VALIDATION_LOG"
+    "${ZSTDCAT_CMD[@]}" < <(stream_source) > /dev/null 2>"$VALIDATION_LOG"
     VALIDATION_RESULT=$?
     set -e
     if ! decoder_end_is_expected "$VALIDATION_RESULT" "$VALIDATION_LOG"; then
@@ -373,7 +402,7 @@ FULL_ARCHIVE_ARG=()
 if [[ $FULL_ARCHIVE -eq 1 ]]; then
     FULL_ARCHIVE_ARG=(--full-archive)
 fi
-"${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
+"${ZSTDCAT_CMD[@]}" < <(stream_source) 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
     --ratings "$RATINGS" \
     --speeds "$SPEED_FILTER" \
     --speed-name "$SPEED_NAME" \

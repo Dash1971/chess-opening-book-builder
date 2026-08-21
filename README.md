@@ -104,6 +104,16 @@ files are read in place and are never removed by `--clean`:
   --month 2025-06
 ```
 
+To process only the first 10 GiB of a larger local archive, add `--size-gb`.
+The prefix is streamed directly from the source file; no 10 GiB copy is made:
+
+```bash
+./build-books.sh --defaults \
+  --source /data/lichess_db_standard_rated_2025-06.pgn.zst \
+  --month 2025-06 \
+  --size-gb 10
+```
+
 You can also supply an HTTP(S) URL. The complete remote file is downloaded and
 cached by default. Add `--size-gb` to select only a prefix when the server
 supports HTTP range requests:

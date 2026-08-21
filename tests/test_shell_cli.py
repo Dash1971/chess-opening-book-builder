@@ -25,6 +25,30 @@ def test_help_contains_source_examples() -> None:
     assert "--source LOCATION" in result.stdout
     assert "--source /data/lichess_games.pgn.zst" in result.stdout
     assert "--source https://example.org/games.pgn.zst" in result.stdout
+    assert "--month 2025-06 --size-gb 10" in result.stdout
+
+
+def test_local_size_cannot_exceed_source(tmp_path: Path) -> None:
+    archive = tmp_path / "small.pgn.zst"
+    archive.write_bytes(zstandard.ZstdCompressor().compress(b"[Event test]\n"))
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / "build-books.sh"),
+            "--defaults",
+            "--source",
+            str(archive),
+            "--month",
+            "2025-06",
+            "--size-gb",
+            "1",
+            "--download-only",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "larger than the local source" in result.stderr
 
 
 def test_local_source_is_validated_without_copying(tmp_path: Path) -> None:
