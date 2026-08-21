@@ -127,6 +127,10 @@ supports HTTP range requests:
 
 The source must be a zstd-compressed standard-chess PGN archive. `--month` is
 still required as provenance and is included in the output filename.
+Before parsing games, the wrapper performs a full decoder pass so truncated or
+corrupt complete sources fail early. Intentional prefixes are recognized and
+remain valid. This validation adds a short sequential read but avoids losing a
+long build to a decoder error discovered at the end.
 
 To change the output or persistent download-cache directory:
 

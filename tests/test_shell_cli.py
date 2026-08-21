@@ -153,7 +153,7 @@ def test_remote_source_downloads_complete_file_by_default(tmp_path: Path) -> Non
     assert cached[0].read_bytes() == archive.read_bytes()
 
 
-def test_truncated_local_archive_fails_and_discards_books(tmp_path: Path) -> None:
+def test_truncated_local_archive_fails_before_building(tmp_path: Path) -> None:
     archive = tmp_path / "truncated.pgn.zst"
     game = (
         '[Event "Rated Rapid game"]\n'
@@ -187,7 +187,6 @@ def test_truncated_local_archive_fails_and_discards_books(tmp_path: Path) -> Non
             "2025-06",
             "--min-position-games",
             "1",
-            "--download-only",
         ],
         capture_output=True,
         text=True,
@@ -195,4 +194,5 @@ def test_truncated_local_archive_fails_and_discards_books(tmp_path: Path) -> Non
     )
     assert result.returncode != 0
     assert "decoder failed while validating" in result.stderr
+    assert "Building rating" not in result.stdout
     assert not list((tmp_path / "books").glob("*.bin"))

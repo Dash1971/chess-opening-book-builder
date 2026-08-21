@@ -364,21 +364,26 @@ decoder_end_is_expected() {
     return 1
 }
 
+VALIDATION_LOG=$(mktemp "${TMPDIR:-/tmp}/chess-opening-book-builder-validation.XXXXXX")
+trap 'rm -f "$VALIDATION_LOG"' EXIT HUP INT TERM
+printf 'Validating complete compressed input before building...\n'
+set +e
+"${ZSTDCAT_CMD[@]}" < <(stream_source) > /dev/null 2>"$VALIDATION_LOG"
+VALIDATION_RESULT=$?
+set -e
+if ! decoder_end_is_expected "$VALIDATION_RESULT" "$VALIDATION_LOG"; then
+    echo "zstd decoder failed while validating the source" >&2
+    tail -5 "$VALIDATION_LOG" >&2
+    exit "$VALIDATION_RESULT"
+fi
+
 if [[ $DOWNLOAD_ONLY -eq 1 ]]; then
-    VALIDATION_LOG=$(mktemp "${TMPDIR:-/tmp}/chess-opening-book-builder-validation.XXXXXX")
-    trap 'rm -f "$VALIDATION_LOG"' EXIT HUP INT TERM
-    set +e
-    "${ZSTDCAT_CMD[@]}" < <(stream_source) > /dev/null 2>"$VALIDATION_LOG"
-    VALIDATION_RESULT=$?
-    set -e
-    if ! decoder_end_is_expected "$VALIDATION_RESULT" "$VALIDATION_LOG"; then
-        echo "zstd decoder failed while validating the source" >&2
-        tail -5 "$VALIDATION_LOG" >&2
-        exit "$VALIDATION_RESULT"
-    fi
     printf 'Validated archive source: %s\n' "$CHUNK"
     exit 0
 fi
+rm -f "$VALIDATION_LOG"
+trap - EXIT HUP INT TERM
+printf 'Source validation passed.\n'
 
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/chess-opening-book-builder.XXXXXX")
 cleanup_run_dir() {
