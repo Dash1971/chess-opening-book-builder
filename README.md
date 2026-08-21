@@ -14,6 +14,7 @@ Stockfish, and other chess engines or GUIs that support Polyglot books.
 - groups games by average player rating within ±100 of each target
 - filters by rapid, blitz, classical, or combined time-control groups
 - scales move weights proportionally to observed move frequency
+- keeps every observed move when at least 25 games reached its position
 - writes standard Polyglot `.bin` files to `~/chess/books/`
 - preserves a partial build when interrupted with Ctrl-C
 
@@ -80,8 +81,21 @@ For each game, the builder averages White and Black Elo. A target book accepts
 the game when that average is within 100 points of the target, inclusive. A
 single game can therefore contribute to more than one requested target book.
 
-Only rated games in the selected time-control group are used. The first 30
-plies are collected, and moves seen fewer than three times are omitted.
+Only rated games in the selected time-control group are used. Games with more
+than a 200-point difference between the players are excluded. The first 40
+plies are collected, and a position is emitted only when at least 25 matching
+games reached it. Every move observed in an emitted position is retained, and
+weights are normalized independently within each position.
+
+The Python builder lives in `book_builder.py`; `build-books.sh` provides the
+interactive download and setup flow. Tests are under `tests/` and can be run
+with:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest -q
+```
 
 ## Data and licensing
 
