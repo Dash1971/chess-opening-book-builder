@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import struct
 import sys
@@ -17,6 +18,8 @@ import chess
 import chess.pgn
 import chess.polyglot
 
+
+VERSION = "0.2.0"
 
 PROMOTION_CODES = {
     chess.KNIGHT: 1,
@@ -36,6 +39,10 @@ class BuildConfig:
     min_position_games: int = 25
     max_plies: int = 40
     max_elo_diff: int = 200
+    month: str = "unknown"
+    source_url: str = "unknown"
+    source_bytes: int = 0
+    partial_prefix: bool = True
 
 
 @dataclass
@@ -90,8 +97,10 @@ def event_matches(event: str, speeds: frozenset[str]) -> bool:
     return "rated" in lowered and any(speed in lowered for speed in speeds)
 
 
-def collect_stream(stream: TextIO, config: BuildConfig) -> BuildState:
-    state = BuildState(config)
+def collect_stream(
+    stream: TextIO, config: BuildConfig, state: BuildState | None = None
+) -> BuildState:
+    state = state or BuildState(config)
     started = time.monotonic()
     last_print = started
 
@@ -182,10 +191,29 @@ def entries_for_rating(state: BuildState, rating: int) -> list[tuple[int, int, i
 
 
 def output_path(config: BuildConfig, rating: int) -> Path:
-    return config.output_dir / f"lichess_{rating}_{config.speed_name}.bin"
+    return config.output_dir / (
+        f"lichess_{rating}_{config.speed_name}_{config.month}.bin"
+    )
 
 
-def write_rating_book(state: BuildState, rating: int) -> Path | None:
+def metadata_path(book_path: Path) -> Path:
+    return book_path.with_suffix(".json")
+
+
+def write_json_atomic(destination: Path, payload: dict[str, object]) -> None:
+    temporary = destination.with_name(destination.name + ".tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as metadata:
+            json.dump(payload, metadata, indent=2, sort_keys=True)
+            metadata.write("\n")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_rating_book(
+    state: BuildState, rating: int, build_status: str = "complete"
+) -> Path | None:
     entries = entries_for_rating(state, rating)
     if not entries:
         return None
@@ -200,13 +228,44 @@ def write_rating_book(state: BuildState, rating: int) -> Path | None:
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+    config = state.config
+    write_json_atomic(
+        metadata_path(destination),
+        {
+            "artifact": destination.name,
+            "build_status": build_status,
+            "builder_version": VERSION,
+            "parameters": {
+                "band_width": config.band_width,
+                "max_elo_diff": config.max_elo_diff,
+                "max_plies": config.max_plies,
+                "min_position_games": config.min_position_games,
+                "rating": rating,
+                "speed": config.speed_name,
+                "speed_filters": sorted(config.speeds),
+            },
+            "source": {
+                "bytes": config.source_bytes,
+                "month": config.month,
+                "partial_prefix": config.partial_prefix,
+                "url": config.source_url,
+            },
+            "statistics": {
+                "book_entries": len(entries),
+                "games_in_rating_bucket": state.bucket_games[rating],
+                "games_matched": state.games_matched,
+                "games_scanned": state.games_scanned,
+            },
+        },
+    )
     return destination
 
 
-def write_books(state: BuildState) -> list[Path]:
+def write_books(state: BuildState, build_status: str = "complete") -> list[Path]:
     paths = []
     for rating in state.config.ratings:
-        path = write_rating_book(state, rating)
+        path = write_rating_book(state, rating, build_status)
         if path is not None:
             paths.append(path)
     return paths
@@ -222,6 +281,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-position-games", type=int, default=25)
     parser.add_argument("--max-plies", type=int, default=40)
     parser.add_argument("--max-elo-diff", type=int, default=200)
+    parser.add_argument("--month", required=True)
+    parser.add_argument("--source-url", required=True)
+    parser.add_argument("--source-bytes", type=int, required=True)
+    parser.add_argument("--full-archive", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -236,14 +299,35 @@ def main(argv: list[str] | None = None) -> int:
         min_position_games=args.min_position_games,
         max_plies=args.max_plies,
         max_elo_diff=args.max_elo_diff,
+        month=args.month,
+        source_url=args.source_url,
+        source_bytes=args.source_bytes,
+        partial_prefix=not args.full_archive,
     )
-    state = collect_stream(sys.stdin, config)
-    paths = write_books(state)
+    for label, value in (
+        ("band width", config.band_width),
+        ("minimum position games", config.min_position_games),
+        ("maximum plies", config.max_plies),
+        ("maximum Elo difference", config.max_elo_diff),
+        ("source bytes", config.source_bytes),
+    ):
+        if value <= 0:
+            raise SystemExit(f"{label} must be positive")
+
+    state = BuildState(config)
+    interrupted = False
+    try:
+        collect_stream(sys.stdin, config, state)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("Interrupted; writing a partial book from collected games.", file=sys.stderr)
+
+    paths = write_books(state, "interrupted" if interrupted else "complete")
     print(f"Scanned: {state.games_scanned:,} games")
     print(f"Matched: {state.games_matched:,} games")
     for path in paths:
         print(path)
-    return 0
+    return 130 if interrupted else 0
 
 
 if __name__ == "__main__":

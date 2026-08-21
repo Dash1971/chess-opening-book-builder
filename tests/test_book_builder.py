@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import io
+import json
 import struct
 from pathlib import Path
 
 import chess
 import chess.polyglot
+import pytest
 
+import book_builder
 from book_builder import (
     BuildConfig,
     collect_stream,
@@ -119,8 +122,43 @@ def test_written_book_invariants_and_legal_moves(tmp_path: Path) -> None:
     assert len({(key, move) for key, move, _weight, _learn in records}) == len(records)
     assert all(1 <= weight <= 65535 for _key, _move, weight, _learn in records)
     assert not path.with_name(path.name + ".tmp").exists()
+    metadata = json.loads(path.with_suffix(".json").read_text())
+    assert metadata["build_status"] == "complete"
+    assert metadata["parameters"]["min_position_games"] == 1
+    assert metadata["statistics"]["book_entries"] == len(records)
 
     with chess.polyglot.open_reader(path) as reader:
         entries = list(reader.find_all(chess.Board()))
     assert entries
     assert all(entry.move in chess.Board().legal_moves for entry in entries)
+
+
+def test_interruption_writes_partial_metadata_and_exits_130(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_collect = book_builder.collect_stream
+
+    def interrupt_after_games(stream, build_config, state):
+        original_collect(io.StringIO(make_game("e4") * 25), build_config, state)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(book_builder, "collect_stream", interrupt_after_games)
+    result = book_builder.main(
+        [
+            "--ratings", "1600",
+            "--speeds", "rapid",
+            "--speed-name", "rapid",
+            "--output-dir", str(tmp_path),
+            "--band-width", "50",
+            "--min-position-games", "25",
+            "--max-plies", "40",
+            "--max-elo-diff", "200",
+            "--month", "2024-01",
+            "--source-url", "https://example.invalid/archive.pgn.zst",
+            "--source-bytes", "1024",
+        ]
+    )
+    assert result == 130
+    metadata_files = list(tmp_path.glob("*.json"))
+    assert len(metadata_files) == 1
+    assert json.loads(metadata_files[0].read_text())["build_status"] == "interrupted"
