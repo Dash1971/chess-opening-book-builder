@@ -52,6 +52,22 @@ def config(tmp_path: Path, **overrides: int) -> BuildConfig:
     )
 
 
+def test_direct_python_defaults_match_shell_preset() -> None:
+    args = book_builder.parse_args(
+        [
+            "--ratings", "1600",
+            "--speeds", "rapid",
+            "--speed-name", "rapid",
+            "--output-dir", "/tmp/books",
+            "--month", "2025-06",
+            "--source-url", "file:///tmp/games.pgn.zst",
+            "--source-bytes", "1024",
+        ]
+    )
+    assert args.band_width == 50
+    assert args.max_plies == 30
+
+
 def test_castling_uses_rook_square() -> None:
     board = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
     encoded = encode_polyglot_move(board, chess.Move.from_uci("e1g1"))
@@ -145,8 +161,8 @@ def test_written_book_invariants_and_legal_moves(tmp_path: Path) -> None:
     data = path.read_bytes()
     assert len(data) % 16 == 0
     records = [struct.unpack(">QHHi", data[i : i + 16]) for i in range(0, len(data), 16)]
-    assert [(key, move) for key, move, _weight, _learn in records] == sorted(
-        (key, move) for key, move, _weight, _learn in records
+    assert [(key, -weight, move) for key, move, weight, _learn in records] == sorted(
+        (key, -weight, move) for key, move, weight, _learn in records
     )
     assert len({(key, move) for key, move, _weight, _learn in records}) == len(records)
     assert all(1 <= weight <= 65535 for _key, _move, weight, _learn in records)
@@ -154,6 +170,7 @@ def test_written_book_invariants_and_legal_moves(tmp_path: Path) -> None:
     metadata = json.loads(path.with_suffix(".json").read_text())
     assert metadata["build_status"] == "complete"
     assert metadata["parameters"]["min_position_games"] == 1
+    assert metadata["source"]["decoder"] == "unknown"
     assert metadata["statistics"]["book_entries"] == len(records)
 
     with chess.polyglot.open_reader(path) as reader:

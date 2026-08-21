@@ -26,7 +26,7 @@ Options:
   --source LOCATION              Local .pgn.zst path or HTTP(S) archive URL
   --band-width N                 Rating half-width (default: 50)
   --min-position-games N         Minimum games reaching a position (default: 25)
-  --max-plies N                  Maximum collected plies (default: 40)
+  --max-plies N                  Maximum collected plies (default: 30)
   --max-elo-diff N               Maximum player rating difference (default: 200)
   --clean                        Delete downloaded cache after success (never local source)
   --download-only                Cache and validate the prefix without building
@@ -51,7 +51,7 @@ MAX_GB=5
 MONTH="2024-01"
 BAND_WIDTH=50
 MIN_POSITION_GAMES=25
-MAX_PLIES=40
+MAX_PLIES=30
 MAX_ELO_DIFF=200
 CLEAN=0
 DOWNLOAD_ONLY=0
@@ -202,11 +202,13 @@ fi
 
 if command -v zstdcat >/dev/null 2>&1; then
     ZSTDCAT_CMD=(zstdcat)
+    DECODER_NAME="zstd-cli"
 else
     if ! "$PYTHON_CMD" -c "import zstandard" 2>/dev/null; then
         "$PYTHON_CMD" -m pip install --disable-pip-version-check "zstandard>=0.23,<1"
     fi
     ZSTDCAT_CMD=("$PYTHON_CMD" "$SCRIPT_DIR/tools/zstdcat.py")
+    DECODER_NAME="python-zstandard"
 fi
 
 mkdir -p "$BOOKS_DIR" "$CACHE_DIR"
@@ -215,6 +217,7 @@ file_size() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
 
 SOURCE_IS_LOCAL=0
 SOURCE_REMOTE_FULL=0
+FULL_ARCHIVE=0
 if [[ -z "$SOURCE" ]]; then
     SOURCE_URL="https://database.lichess.org/standard/lichess_db_standard_rated_${MONTH}.pgn.zst"
     CHUNK="$CACHE_DIR/lichess-${MONTH}-${MAX_GB}gb.pgn.zst"
@@ -225,6 +228,7 @@ elif [[ "$SOURCE" =~ ^https?:// ]]; then
         CHUNK="$CACHE_DIR/source-${SOURCE_ID}-${MAX_GB}gb.pgn.zst"
     else
         SOURCE_REMOTE_FULL=1
+        FULL_ARCHIVE=1
         CHUNK="$CACHE_DIR/source-${SOURCE_ID}-full.pgn.zst"
     fi
 else
@@ -239,6 +243,7 @@ else
     CHUNK="$SOURCE_DIR/$(basename "$SOURCE")"
     SOURCE_URL="file://$CHUNK"
     SOURCE_IS_LOCAL=1
+    FULL_ARCHIVE=1
     MAX_BYTES=$(file_size "$CHUNK")
 fi
 
@@ -313,8 +318,36 @@ if ! "${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>/dev/null | head -c 1000 | grep -q "\[Even
     exit 1
 fi
 
+decoder_end_is_expected() {
+    local result="$1"
+    local log="$2"
+    if [[ $result -eq 0 ]]; then
+        return 0
+    fi
+    if [[ $FULL_ARCHIVE -eq 0 ]]; then
+        if [[ "$DECODER_NAME" == "python-zstandard" && $result -eq 3 ]]; then
+            return 0
+        fi
+        if grep -Eqi 'premature end|Read error \(39\)' "$log"; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 if [[ $DOWNLOAD_ONLY -eq 1 ]]; then
-    printf 'Validated archive prefix: %s\n' "$CHUNK"
+    VALIDATION_LOG=$(mktemp "${TMPDIR:-/tmp}/chess-opening-book-builder-validation.XXXXXX")
+    trap 'rm -f "$VALIDATION_LOG"' EXIT HUP INT TERM
+    set +e
+    "${ZSTDCAT_CMD[@]}" < "$CHUNK" > /dev/null 2>"$VALIDATION_LOG"
+    VALIDATION_RESULT=$?
+    set -e
+    if ! decoder_end_is_expected "$VALIDATION_RESULT" "$VALIDATION_LOG"; then
+        echo "zstd decoder failed while validating the source" >&2
+        tail -5 "$VALIDATION_LOG" >&2
+        exit "$VALIDATION_RESULT"
+    fi
+    printf 'Validated archive source: %s\n' "$CHUNK"
     exit 0
 fi
 
@@ -336,6 +369,10 @@ printf '%bBuilding rating %s, %s, ±%s Elo%b\n' \
 set +e
 INTERRUPTED=0
 trap 'INTERRUPTED=1' INT
+FULL_ARCHIVE_ARG=()
+if [[ $FULL_ARCHIVE -eq 1 ]]; then
+    FULL_ARCHIVE_ARG=(--full-archive)
+fi
 "${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
     --ratings "$RATINGS" \
     --speeds "$SPEED_FILTER" \
@@ -347,7 +384,9 @@ trap 'INTERRUPTED=1' INT
     --max-elo-diff "$MAX_ELO_DIFF" \
     --month "$MONTH" \
     --source-url "$SOURCE_URL" \
-    --source-bytes "$MAX_BYTES"
+    --source-bytes "$MAX_BYTES" \
+    --decoder "$DECODER_NAME" \
+    "${FULL_ARCHIVE_ARG[@]}"
 PIPE_RESULTS=("${PIPESTATUS[@]}")
 trap - INT
 set -e
@@ -368,8 +407,7 @@ if [[ $BUILDER_RESULT -ne 0 ]]; then
     exit "$BUILDER_RESULT"
 fi
 
-if [[ $DECODER_RESULT -ne 0 ]] \
-    && ! grep -Eqi 'premature end|Read error \(39\)' "$DECODER_LOG"; then
+if ! decoder_end_is_expected "$DECODER_RESULT" "$DECODER_LOG"; then
     echo "zstd decoder failed unexpectedly; staged books were discarded" >&2
     tail -5 "$DECODER_LOG" >&2
     exit "$DECODER_RESULT"

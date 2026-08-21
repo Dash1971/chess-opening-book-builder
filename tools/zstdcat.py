@@ -3,16 +3,36 @@
 
 from __future__ import annotations
 
-import shutil
 import sys
 
 import zstandard
 
 
 def main() -> int:
-    decompressor = zstandard.ZstdDecompressor()
-    with decompressor.stream_reader(sys.stdin.buffer, read_across_frames=True) as reader:
-        shutil.copyfileobj(reader, sys.stdout.buffer, length=1024 * 1024)
+    decoder = None
+    completed_frame = False
+    try:
+        while True:
+            chunk = sys.stdin.buffer.read(1024 * 1024)
+            if not chunk:
+                break
+            pending = chunk
+            while pending:
+                if decoder is None:
+                    decoder = zstandard.ZstdDecompressor().decompressobj()
+                sys.stdout.buffer.write(decoder.decompress(pending))
+                if decoder.eof:
+                    completed_frame = True
+                    pending = decoder.unused_data
+                    decoder = None
+                else:
+                    pending = b""
+    except BrokenPipeError:
+        return 0
+
+    if decoder is not None or not completed_frame:
+        print("incomplete zstd frame", file=sys.stderr)
+        return 3
     return 0
 
 

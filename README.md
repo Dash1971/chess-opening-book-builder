@@ -64,8 +64,8 @@ lichess_1800_blitz_rapid_2024-01.bin
 ```
 
 Each book has a matching `.json` sidecar recording its source month and URL,
-prefix byte count, rating parameters, thresholds, build status, and summary
-statistics.
+byte count, whether the source was complete or a prefix, the decoder used,
+rating parameters, thresholds, build status, and summary statistics.
 
 For a non-interactive Maia3 1600 Rapid imitation book:
 
@@ -76,7 +76,7 @@ For a non-interactive Maia3 1600 Rapid imitation book:
 ```
 
 The preset uses rating 1600, Rapid, a ±50 rating band, at least 25 games per
-emitted position, 40 plies maximum, a 200-point maximum opponent gap, and a
+emitted position, 30 plies maximum, a 200-point maximum opponent gap, and a
 5 GiB January 2024 archive prefix.
 
 All important parameters can be overridden:
@@ -89,7 +89,7 @@ All important parameters can be overridden:
   --month 2025-06 \
   --band-width 50 \
   --min-position-games 25 \
-  --max-plies 40 \
+  --max-plies 30 \
   --max-elo-diff 200
 ```
 
@@ -137,7 +137,7 @@ the game when that average is within the configured band width, inclusive. A
 single game can therefore contribute to more than one requested target book.
 
 Only rated games in the selected time-control group are used. Games with more
-than a 200-point difference between the players are excluded. The first 40
+than a 200-point difference between the players are excluded. The first 30
 plies are collected, and a position is emitted only when at least 25 matching
 games reached it. Every move observed in an emitted position is retained, and
 weights are normalized independently within each position.

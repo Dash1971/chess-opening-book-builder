@@ -37,14 +37,15 @@ class BuildConfig:
     speeds: frozenset[str]
     speed_name: str
     output_dir: Path
-    band_width: int = 100
+    band_width: int = 50
     min_position_games: int = 25
-    max_plies: int = 40
+    max_plies: int = 30
     max_elo_diff: int = 200
     month: str = "unknown"
     source_url: str = "unknown"
     source_bytes: int = 0
     partial_prefix: bool = True
+    decoder: str = "unknown"
 
 
 @dataclass
@@ -225,7 +226,9 @@ def entries_for_rating(state: BuildState, rating: int) -> list[tuple[int, int, i
         for (key, move), count in state.move_counts[rating].items()
         if key in eligible_keys
     ]
-    entries.sort(key=lambda entry: (entry[0], entry[1]))
+    # Key ordering is required by Polyglot. Weight-descending order within a
+    # key also supports simple readers that use the first matching entry.
+    entries.sort(key=lambda entry: (entry[0], -entry[2], entry[1]))
     return entries
 
 
@@ -246,23 +249,29 @@ def peak_rss_mib() -> float:
     return maximum / 1024
 
 
-def ply_statistics(state: BuildState, rating: int) -> dict[str, dict[str, int]]:
+def ply_statistics(
+    state: BuildState,
+    rating: int,
+    book_entries: list[tuple[int, int, int]],
+) -> dict[str, dict[str, int]]:
     eligible_keys = {
         key
         for key, games in state.position_games[rating].items()
         if games >= state.config.min_position_games
     }
     positions: dict[int, int] = defaultdict(int)
-    entries: dict[int, int] = defaultdict(int)
+    entries_by_ply: dict[int, int] = defaultdict(int)
     covered_observations: dict[int, int] = defaultdict(int)
     for key in eligible_keys:
         ply = state.position_min_ply[rating][key]
         positions[ply] += 1
         covered_observations[ply] += state.position_games[rating][key]
-    for key, _move, _weight in entries_for_rating(state, rating):
-        entries[state.position_min_ply[rating][key]] += 1
+    for key, _move, _weight in book_entries:
+        entries_by_ply[state.position_min_ply[rating][key]] += 1
     return {
-        "book_entries": {str(ply): entries[ply] for ply in sorted(entries)},
+        "book_entries": {
+            str(ply): entries_by_ply[ply] for ply in sorted(entries_by_ply)
+        },
         "covered_game_observations": {
             str(ply): covered_observations[ply]
             for ply in sorted(covered_observations)
@@ -326,6 +335,7 @@ def write_rating_book(
                 "bytes": config.source_bytes,
                 "month": config.month,
                 "partial_prefix": config.partial_prefix,
+                "decoder": config.decoder,
                 "url": config.source_url,
             },
             "statistics": {
@@ -335,7 +345,7 @@ def write_rating_book(
                 "games_matched": state.games_matched,
                 "games_scanned": state.games_scanned,
                 "peak_rss_mib": round(peak_rss_mib(), 3),
-                "ply": ply_statistics(state, rating),
+                "ply": ply_statistics(state, rating, entries),
             },
         },
     )
@@ -357,14 +367,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--speeds", required=True)
     parser.add_argument("--speed-name", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--band-width", type=int, default=100)
+    parser.add_argument("--band-width", type=int, default=50)
     parser.add_argument("--min-position-games", type=int, default=25)
-    parser.add_argument("--max-plies", type=int, default=40)
+    parser.add_argument("--max-plies", type=int, default=30)
     parser.add_argument("--max-elo-diff", type=int, default=200)
     parser.add_argument("--month", required=True)
     parser.add_argument("--source-url", required=True)
     parser.add_argument("--source-bytes", type=int, required=True)
     parser.add_argument("--full-archive", action="store_true")
+    parser.add_argument("--decoder", default="unknown")
     return parser.parse_args(argv)
 
 
@@ -383,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
         source_url=args.source_url,
         source_bytes=args.source_bytes,
         partial_prefix=not args.full_archive,
+        decoder=args.decoder,
     )
     for label, value in (
         ("band width", config.band_width),
