@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import resource
 import struct
 import sys
 import time
@@ -50,9 +51,12 @@ class BuildState:
     config: BuildConfig
     move_counts: dict[int, dict[tuple[int, int], int]] = field(init=False)
     position_games: dict[int, dict[int, int]] = field(init=False)
+    position_min_ply: dict[int, dict[int, int]] = field(init=False)
     bucket_games: dict[int, int] = field(init=False)
+    observations_by_ply: dict[int, dict[int, int]] = field(init=False)
     games_scanned: int = 0
     games_matched: int = 0
+    started_at: float = field(default_factory=time.monotonic)
 
     def __post_init__(self) -> None:
         self.move_counts = {
@@ -61,7 +65,11 @@ class BuildState:
         self.position_games = {
             rating: defaultdict(int) for rating in self.config.ratings
         }
+        self.position_min_ply = {rating: {} for rating in self.config.ratings}
         self.bucket_games = {rating: 0 for rating in self.config.ratings}
+        self.observations_by_ply = {
+            rating: defaultdict(int) for rating in self.config.ratings
+        }
 
 
 def encode_polyglot_move(board: chess.Board, move: chess.Move) -> int:
@@ -137,19 +145,23 @@ def collect_stream(
 
         state.games_matched += 1
         board = game.board()
-        observations: list[tuple[int, int]] = []
-        for move in mainline[: config.max_plies]:
+        observations: list[tuple[int, int, int]] = []
+        for ply, move in enumerate(mainline[: config.max_plies], start=1):
             key = chess.polyglot.zobrist_hash(board)
-            observations.append((key, encode_polyglot_move(board, move)))
+            observations.append((key, encode_polyglot_move(board, move), ply))
             board.push(move)
 
-        positions_in_game = {key for key, _ in observations}
+        positions_in_game: dict[int, int] = {}
+        for key, _move, ply in observations:
+            positions_in_game.setdefault(key, ply)
         for rating in ratings:
             state.bucket_games[rating] += 1
-            for key in positions_in_game:
+            for key, ply in positions_in_game.items():
                 state.position_games[rating][key] += 1
-            for observation in observations:
-                state.move_counts[rating][observation] += 1
+                state.position_min_ply[rating].setdefault(key, ply)
+                state.observations_by_ply[rating][ply] += 1
+            for key, move, _ply in observations:
+                state.move_counts[rating][(key, move)] += 1
 
         now = time.monotonic()
         if now - last_print >= 3:
@@ -198,6 +210,44 @@ def output_path(config: BuildConfig, rating: int) -> Path:
 
 def metadata_path(book_path: Path) -> Path:
     return book_path.with_suffix(".json")
+
+
+def peak_rss_mib() -> float:
+    maximum = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        maximum /= 1024
+    return maximum / 1024
+
+
+def ply_statistics(state: BuildState, rating: int) -> dict[str, dict[str, int]]:
+    eligible_keys = {
+        key
+        for key, games in state.position_games[rating].items()
+        if games >= state.config.min_position_games
+    }
+    positions: dict[int, int] = defaultdict(int)
+    entries: dict[int, int] = defaultdict(int)
+    covered_observations: dict[int, int] = defaultdict(int)
+    for key in eligible_keys:
+        ply = state.position_min_ply[rating][key]
+        positions[ply] += 1
+        covered_observations[ply] += state.position_games[rating][key]
+    for key, _move, _weight in entries_for_rating(state, rating):
+        entries[state.position_min_ply[rating][key]] += 1
+    return {
+        "book_entries": {str(ply): entries[ply] for ply in sorted(entries)},
+        "covered_game_observations": {
+            str(ply): covered_observations[ply]
+            for ply in sorted(covered_observations)
+        },
+        "emitted_positions": {
+            str(ply): positions[ply] for ply in sorted(positions)
+        },
+        "matched_game_observations": {
+            str(ply): count
+            for ply, count in sorted(state.observations_by_ply[rating].items())
+        },
+    }
 
 
 def write_json_atomic(destination: Path, payload: dict[str, object]) -> None:
@@ -253,9 +303,12 @@ def write_rating_book(
             },
             "statistics": {
                 "book_entries": len(entries),
+                "elapsed_seconds": round(time.monotonic() - state.started_at, 3),
                 "games_in_rating_bucket": state.bucket_games[rating],
                 "games_matched": state.games_matched,
                 "games_scanned": state.games_scanned,
+                "peak_rss_mib": round(peak_rss_mib(), 3),
+                "ply": ply_statistics(state, rating),
             },
         },
     )

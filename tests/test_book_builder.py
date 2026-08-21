@@ -17,6 +17,7 @@ from book_builder import (
     entries_for_rating,
     write_books,
 )
+from tools.verify_book import verify_book
 
 
 def make_game(first_move: str, white: int = 1600, black: int = 1600) -> str:
@@ -131,6 +132,7 @@ def test_written_book_invariants_and_legal_moves(tmp_path: Path) -> None:
         entries = list(reader.find_all(chess.Board()))
     assert entries
     assert all(entry.move in chess.Board().legal_moves for entry in entries)
+    assert verify_book(path, random_walks=10)["valid"] is True
 
 
 def test_interruption_writes_partial_metadata_and_exits_130(

@@ -133,6 +133,9 @@ bash -n build-books.sh
 GitHub Actions runs the Python tests on Linux and macOS and runs ShellCheck on
 the Bash wrapper.
 
+For real-corpus performance measurement, Polyglot verification, and held-out
+move-distribution evaluation, see [docs/BENCHMARKING.md](docs/BENCHMARKING.md).
+
 ## Data and licensing
 
 Lichess database exports are released under CC0. This project does not bundle

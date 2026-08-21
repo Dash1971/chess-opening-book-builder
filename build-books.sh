@@ -28,6 +28,7 @@ Options:
   --max-plies N                  Maximum collected plies (default: 40)
   --max-elo-diff N               Maximum player rating difference (default: 200)
   --clean                        Delete the cached archive prefix after success
+  --download-only                Cache and validate the prefix without building
   -h, --help                     Show this help
 
 Environment:
@@ -45,6 +46,7 @@ MIN_POSITION_GAMES=25
 MAX_PLIES=40
 MAX_ELO_DIFF=200
 CLEAN=0
+DOWNLOAD_ONLY=0
 NON_INTERACTIVE=0
 
 need_value() {
@@ -87,6 +89,8 @@ while [[ $# -gt 0 ]]; do
             need_value "$@"; MAX_ELO_DIFF="$2"; NON_INTERACTIVE=1; shift 2 ;;
         --clean)
             CLEAN=1; shift ;;
+        --download-only)
+            DOWNLOAD_ONLY=1; NON_INTERACTIVE=1; shift ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -163,7 +167,6 @@ install_hint() {
     fi
     exit 1
 }
-command -v zstdcat >/dev/null 2>&1 || install_hint zstd
 command -v curl >/dev/null 2>&1 || install_hint curl
 
 if command -v pypy3 >/dev/null 2>&1 \
@@ -178,11 +181,20 @@ else
             exit 1
         }
     fi
-    if ! "$VENV/bin/python" -c "import chess; import chess.polyglot; import chess.pgn" 2>/dev/null; then
+    if ! "$VENV/bin/python" -c "import chess; import chess.polyglot; import chess.pgn; import zstandard" 2>/dev/null; then
         "$VENV/bin/python" -m pip install --disable-pip-version-check \
-            "python-chess>=1.999,<2"
+            -r "$SCRIPT_DIR/requirements.txt"
     fi
     PYTHON_CMD="$VENV/bin/python"
+fi
+
+if command -v zstdcat >/dev/null 2>&1; then
+    ZSTDCAT_CMD=(zstdcat)
+else
+    if ! "$PYTHON_CMD" -c "import zstandard" 2>/dev/null; then
+        "$PYTHON_CMD" -m pip install --disable-pip-version-check "zstandard>=0.23,<1"
+    fi
+    ZSTDCAT_CMD=("$PYTHON_CMD" "$SCRIPT_DIR/tools/zstdcat.py")
 fi
 
 mkdir -p "$BOOKS_DIR" "$CACHE_DIR"
@@ -235,9 +247,14 @@ else
     mv "$PART" "$CHUNK"
 fi
 
-if ! zstdcat "$CHUNK" 2>/dev/null | head -c 1000 | grep -q "\[Event"; then
+if ! "${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>/dev/null | head -c 1000 | grep -q "\[Event"; then
     echo "Archive prefix does not begin with valid PGN data" >&2
     exit 1
+fi
+
+if [[ $DOWNLOAD_ONLY -eq 1 ]]; then
+    printf 'Validated archive prefix: %s\n' "$CHUNK"
+    exit 0
 fi
 
 RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/chess-opening-book-builder.XXXXXX")
@@ -256,7 +273,7 @@ printf '%bBuilding rating %s, %s, ±%s Elo%b\n' \
     "$BOLD" "$RATINGS" "$SPEED_NAME" "$BAND_WIDTH" "$RESET"
 
 set +e
-zstdcat "$CHUNK" 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
+"${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
     --ratings "$RATINGS" \
     --speeds "$SPEED_FILTER" \
     --speed-name "$SPEED_NAME" \
