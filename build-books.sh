@@ -403,11 +403,7 @@ printf '%bBuilding rating %s, %s, ±%s Elo%b\n' \
 set +e
 INTERRUPTED=0
 trap 'INTERRUPTED=1' INT
-FULL_ARCHIVE_ARG=()
-if [[ $FULL_ARCHIVE -eq 1 ]]; then
-    FULL_ARCHIVE_ARG=(--full-archive)
-fi
-"${ZSTDCAT_CMD[@]}" < <(stream_source) 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
+set -- \
     --ratings "$RATINGS" \
     --speeds "$SPEED_FILTER" \
     --speed-name "$SPEED_NAME" \
@@ -419,8 +415,12 @@ fi
     --month "$MONTH" \
     --source-url "$SOURCE_URL" \
     --source-bytes "$MAX_BYTES" \
-    --decoder "$DECODER_NAME" \
-    "${FULL_ARCHIVE_ARG[@]}"
+    --decoder "$DECODER_NAME"
+if [[ $FULL_ARCHIVE -eq 1 ]]; then
+    set -- "$@" --full-archive
+fi
+"${ZSTDCAT_CMD[@]}" < <(stream_source) 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
+    "$@"
 PIPE_RESULTS=("${PIPESTATUS[@]}")
 trap - INT
 set -e
