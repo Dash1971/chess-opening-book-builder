@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import resource
@@ -13,7 +14,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import Iterator, TextIO
 
 import chess
 import chess.pgn
@@ -105,63 +106,89 @@ def event_matches(event: str, speeds: frozenset[str]) -> bool:
     return "rated" in lowered and any(speed in lowered for speed in speeds)
 
 
-def collect_stream(
-    stream: TextIO, config: BuildConfig, state: BuildState | None = None
-) -> BuildState:
+def iter_pgn_records(stream: TextIO) -> Iterator[str]:
+    """Yield complete PGN records without parsing their movetext."""
+    record: list[str] = []
+    for line in stream:
+        if line.startswith("[Event ") and record:
+            yield "".join(record)
+            record = []
+        record.append(line)
+    if record:
+        yield "".join(record)
+
+
+def lightweight_headers(record: str) -> dict[str, str]:
+    """Read the few headers needed to reject a game before PGN parsing."""
+    headers: dict[str, str] = {}
+    for line in record.splitlines():
+        if not line:
+            break
+        if not line.startswith("[") or " \"" not in line or not line.endswith('\"]'):
+            continue
+        name, value = line[1:-1].split(" \"", 1)
+        headers[name] = value[:-1]
+    return headers
+
+
+def headers_match(config: BuildConfig, headers: dict[str, str]) -> list[int]:
+    if not event_matches(headers.get("Event", ""), config.speeds):
+        return []
+    try:
+        white_elo = int(headers.get("WhiteElo", "0"))
+        black_elo = int(headers.get("BlackElo", "0"))
+    except ValueError:
+        return []
+    if white_elo <= 0 or black_elo <= 0:
+        return []
+    if abs(white_elo - black_elo) > config.max_elo_diff:
+        return []
+    return matching_ratings(config, (white_elo + black_elo) // 2)
+
+
+def collect_game(game: chess.pgn.Game, ratings: list[int], state: BuildState) -> None:
+    config = state.config
+    mainline = list(game.mainline_moves())
+    if len(mainline) < 6:
+        return
+    state.games_matched += 1
+    board = game.board()
+    observations: list[tuple[int, int, int]] = []
+    for ply, move in enumerate(mainline[: config.max_plies], start=1):
+        key = chess.polyglot.zobrist_hash(board)
+        observations.append((key, encode_polyglot_move(board, move), ply))
+        board.push(move)
+
+    positions_in_game: dict[int, int] = {}
+    for key, _move, ply in observations:
+        positions_in_game.setdefault(key, ply)
+    for rating in ratings:
+        state.bucket_games[rating] += 1
+        for key, ply in positions_in_game.items():
+            state.position_games[rating][key] += 1
+            state.position_min_ply[rating].setdefault(key, ply)
+            state.observations_by_ply[rating][ply] += 1
+        for key, move, _ply in observations:
+            state.move_counts[rating][(key, move)] += 1
+
+
+def collect_stream(stream: TextIO, config: BuildConfig, state: BuildState | None = None) -> BuildState:
     state = state or BuildState(config)
     started = time.monotonic()
     last_print = started
 
-    while True:
+    for record in iter_pgn_records(stream):
+        state.games_scanned += 1
+        ratings = headers_match(config, lightweight_headers(record))
+        if not ratings:
+            continue
         try:
-            game = chess.pgn.read_game(stream)
+            game = chess.pgn.read_game(io.StringIO(record))
         except (ValueError, UnicodeError):
             continue
         if game is None:
-            break
-
-        state.games_scanned += 1
-        headers = game.headers
-        if not event_matches(headers.get("Event", ""), config.speeds):
             continue
-
-        try:
-            white_elo = int(headers.get("WhiteElo", "0"))
-            black_elo = int(headers.get("BlackElo", "0"))
-        except ValueError:
-            continue
-        if white_elo <= 0 or black_elo <= 0:
-            continue
-        if abs(white_elo - black_elo) > config.max_elo_diff:
-            continue
-
-        ratings = matching_ratings(config, (white_elo + black_elo) // 2)
-        if not ratings:
-            continue
-
-        mainline = list(game.mainline_moves())
-        if len(mainline) < 6:
-            continue
-
-        state.games_matched += 1
-        board = game.board()
-        observations: list[tuple[int, int, int]] = []
-        for ply, move in enumerate(mainline[: config.max_plies], start=1):
-            key = chess.polyglot.zobrist_hash(board)
-            observations.append((key, encode_polyglot_move(board, move), ply))
-            board.push(move)
-
-        positions_in_game: dict[int, int] = {}
-        for key, _move, ply in observations:
-            positions_in_game.setdefault(key, ply)
-        for rating in ratings:
-            state.bucket_games[rating] += 1
-            for key, ply in positions_in_game.items():
-                state.position_games[rating][key] += 1
-                state.position_min_ply[rating].setdefault(key, ply)
-                state.observations_by_ply[rating][ply] += 1
-            for key, move, _ply in observations:
-                state.move_counts[rating][(key, move)] += 1
+        collect_game(game, ratings, state)
 
         now = time.monotonic()
         if now - last_print >= 3:

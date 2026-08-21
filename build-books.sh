@@ -273,6 +273,8 @@ printf '%bBuilding rating %s, %s, ±%s Elo%b\n' \
     "$BOLD" "$RATINGS" "$SPEED_NAME" "$BAND_WIDTH" "$RESET"
 
 set +e
+INTERRUPTED=0
+trap 'INTERRUPTED=1' INT
 "${ZSTDCAT_CMD[@]}" < "$CHUNK" 2>"$DECODER_LOG" | "$PYTHON_CMD" -u "$SCRIPT_DIR/book_builder.py" \
     --ratings "$RATINGS" \
     --speeds "$SPEED_FILTER" \
@@ -286,11 +288,12 @@ set +e
     --source-url "$DB_URL" \
     --source-bytes "$MAX_BYTES"
 PIPE_RESULTS=("${PIPESTATUS[@]}")
+trap - INT
 set -e
 DECODER_RESULT="${PIPE_RESULTS[0]}"
 BUILDER_RESULT="${PIPE_RESULTS[1]}"
 
-if [[ $BUILDER_RESULT -eq 130 ]]; then
+if [[ $BUILDER_RESULT -eq 130 || $INTERRUPTED -eq 1 ]]; then
     for artifact in "$RUN_OUTPUT"/*; do
         [[ -f "$artifact" ]] && mv "$artifact" "$BOOKS_DIR/"
     done

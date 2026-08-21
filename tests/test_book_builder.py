@@ -111,6 +111,34 @@ def test_max_elo_difference_filters_mismatches(tmp_path: Path) -> None:
     assert state.games_matched == 0
 
 
+def test_header_first_collection_matches_reference_parse(tmp_path: Path) -> None:
+    pgn = (
+        make_game("e4")
+        + make_game("d4", white=1580, black=1620).replace("\n", "\r\n")
+        + make_game("a3", white=1200, black=2000)
+        + make_game("e4").replace("Rated Rapid", "Rated Blitz")
+    )
+    fast = collect_stream(io.StringIO(pgn), config(tmp_path))
+
+    reference = book_builder.BuildState(config(tmp_path))
+    source = io.StringIO(pgn)
+    while True:
+        game = chess.pgn.read_game(source)
+        if game is None:
+            break
+        reference.games_scanned += 1
+        ratings = book_builder.headers_match(reference.config, dict(game.headers))
+        if ratings:
+            book_builder.collect_game(game, ratings, reference)
+
+    assert fast.games_scanned == reference.games_scanned
+    assert fast.games_matched == reference.games_matched
+    assert fast.bucket_games == reference.bucket_games
+    assert fast.position_games == reference.position_games
+    assert fast.move_counts == reference.move_counts
+    assert entries_for_rating(fast, 1600) == entries_for_rating(reference, 1600)
+
+
 def test_written_book_invariants_and_legal_moves(tmp_path: Path) -> None:
     state = collect_stream(io.StringIO(make_game("e4") * 3), config(tmp_path))
     [path] = write_books(state)
