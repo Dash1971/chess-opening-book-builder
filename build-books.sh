@@ -23,17 +23,25 @@ Options:
   --speed NAME                   rapid, blitz, classical, blitz-rapid, or all
   --size-gb N                    Prefix size in GiB (default: 5)
   --month YYYY-MM                Lichess archive month
+  --source LOCATION              Local .pgn.zst path or HTTP(S) archive URL
   --band-width N                 Rating half-width (default: 50)
   --min-position-games N         Minimum games reaching a position (default: 25)
   --max-plies N                  Maximum collected plies (default: 40)
   --max-elo-diff N               Maximum player rating difference (default: 200)
-  --clean                        Delete the cached archive prefix after success
+  --clean                        Delete downloaded cache after success (never local source)
   --download-only                Cache and validate the prefix without building
   -h, --help                     Show this help
 
 Environment:
   BOOKS_DIR  Output directory (default: ~/chess/books)
   TMP_DIR    Persistent download cache (default: ~/chess/bookbuild-cache)
+
+Examples:
+  ./build-books.sh --preset maia3-1600-rapid
+  ./build-books.sh --defaults --month 2025-06 --size-gb 10
+  ./build-books.sh --defaults --source /data/lichess_games.pgn.zst --month 2025-06
+  ./build-books.sh --defaults --source https://example.org/games.pgn.zst \
+    --month 2025-06 --size-gb 5
 EOF
 }
 
@@ -48,6 +56,8 @@ MAX_ELO_DIFF=200
 CLEAN=0
 DOWNLOAD_ONLY=0
 NON_INTERACTIVE=0
+SOURCE=""
+SIZE_GB_SET=0
 
 need_value() {
     if [[ $# -lt 2 || -z "$2" ]]; then
@@ -76,9 +86,11 @@ while [[ $# -gt 0 ]]; do
         --speed)
             need_value "$@"; SPEED_NAME="$2"; NON_INTERACTIVE=1; shift 2 ;;
         --size-gb)
-            need_value "$@"; MAX_GB="$2"; NON_INTERACTIVE=1; shift 2 ;;
+            need_value "$@"; MAX_GB="$2"; SIZE_GB_SET=1; NON_INTERACTIVE=1; shift 2 ;;
         --month)
             need_value "$@"; MONTH="$2"; NON_INTERACTIVE=1; shift 2 ;;
+        --source)
+            need_value "$@"; SOURCE="$2"; NON_INTERACTIVE=1; shift 2 ;;
         --band-width)
             need_value "$@"; BAND_WIDTH="$2"; NON_INTERACTIVE=1; shift 2 ;;
         --min-position-games)
@@ -199,13 +211,61 @@ fi
 
 mkdir -p "$BOOKS_DIR" "$CACHE_DIR"
 MAX_BYTES=$((MAX_GB * 1073741824))
-CHUNK="$CACHE_DIR/lichess-${MONTH}-${MAX_GB}gb.pgn.zst"
-PART="$CHUNK.part"
-SEGMENT="$CHUNK.segment"
-DB_URL="https://database.lichess.org/standard/lichess_db_standard_rated_${MONTH}.pgn.zst"
 file_size() { wc -c < "$1" 2>/dev/null | tr -d ' ' || echo 0; }
 
-if [[ -f "$CHUNK" ]] && [[ $(file_size "$CHUNK") -eq $MAX_BYTES ]]; then
+SOURCE_IS_LOCAL=0
+SOURCE_REMOTE_FULL=0
+if [[ -z "$SOURCE" ]]; then
+    SOURCE_URL="https://database.lichess.org/standard/lichess_db_standard_rated_${MONTH}.pgn.zst"
+    CHUNK="$CACHE_DIR/lichess-${MONTH}-${MAX_GB}gb.pgn.zst"
+elif [[ "$SOURCE" =~ ^https?:// ]]; then
+    SOURCE_URL="$SOURCE"
+    SOURCE_ID=$(printf '%s' "$SOURCE_URL" | cksum | awk '{print $1}')
+    if [[ $SIZE_GB_SET -eq 1 ]]; then
+        CHUNK="$CACHE_DIR/source-${SOURCE_ID}-${MAX_GB}gb.pgn.zst"
+    else
+        SOURCE_REMOTE_FULL=1
+        CHUNK="$CACHE_DIR/source-${SOURCE_ID}-full.pgn.zst"
+    fi
+else
+    if [[ "$SOURCE" == file://* ]]; then
+        SOURCE="${SOURCE#file://}"
+    fi
+    if [[ ! -f "$SOURCE" ]]; then
+        echo "Local source file does not exist: $SOURCE" >&2
+        exit 1
+    fi
+    SOURCE_DIR=$(cd "$(dirname "$SOURCE")" && pwd -P)
+    CHUNK="$SOURCE_DIR/$(basename "$SOURCE")"
+    SOURCE_URL="file://$CHUNK"
+    SOURCE_IS_LOCAL=1
+    MAX_BYTES=$(file_size "$CHUNK")
+fi
+
+PART="$CHUNK.part"
+SEGMENT="$CHUNK.segment"
+
+if [[ $SOURCE_IS_LOCAL -eq 1 ]]; then
+    printf 'Using local archive: %s (%s bytes)\n' "$CHUNK" "$MAX_BYTES"
+elif [[ $SOURCE_REMOTE_FULL -eq 1 ]]; then
+    if [[ -f "$CHUNK" ]]; then
+        MAX_BYTES=$(file_size "$CHUNK")
+        printf 'Using cached complete remote archive: %s (%s bytes)\n' \
+            "$CHUNK" "$MAX_BYTES"
+    else
+        printf 'Downloading complete archive from %s\n' "$SOURCE_URL"
+        curl --fail --location --retry 3 --retry-delay 5 \
+            --retry-connrefused --progress-bar --continue-at - \
+            --user-agent "chess-opening-book-builder/0.2" \
+            --output "$PART" "$SOURCE_URL"
+        if [[ ! -s "$PART" ]]; then
+            echo "Downloaded source is empty" >&2
+            exit 1
+        fi
+        mv "$PART" "$CHUNK"
+        MAX_BYTES=$(file_size "$CHUNK")
+    fi
+elif [[ -f "$CHUNK" ]] && [[ $(file_size "$CHUNK") -eq $MAX_BYTES ]]; then
     printf 'Using cached %s GiB archive prefix: %s\n' "$MAX_GB" "$CHUNK"
 else
     if [[ -f "$CHUNK" ]]; then
@@ -225,15 +285,16 @@ else
         rm -f "$SEGMENT"
         END_BYTE=$((MAX_BYTES - 1))
         EXPECTED_SEGMENT=$((MAX_BYTES - CURRENT_BYTES))
-        printf 'Downloading bytes %s-%s from Lichess\n' "$CURRENT_BYTES" "$END_BYTE"
+        printf 'Downloading bytes %s-%s from %s\n' \
+            "$CURRENT_BYTES" "$END_BYTE" "$SOURCE_URL"
         HTTP_STATUS=$(curl --fail --location --retry 3 --retry-delay 5 \
             --retry-connrefused --progress-bar \
             --range "${CURRENT_BYTES}-${END_BYTE}" \
             --user-agent "chess-opening-book-builder/0.2" \
-            --output "$SEGMENT" --write-out "%{http_code}" "$DB_URL")
+            --output "$SEGMENT" --write-out "%{http_code}" "$SOURCE_URL")
         if [[ "$HTTP_STATUS" != "206" ]] \
             || [[ $(file_size "$SEGMENT") -ne $EXPECTED_SEGMENT ]]; then
-            echo "Lichess returned an incomplete or unexpected range response" >&2
+            echo "Source returned an incomplete or unexpected range response" >&2
             exit 1
         fi
         cat "$SEGMENT" >> "$PART"
@@ -285,7 +346,7 @@ trap 'INTERRUPTED=1' INT
     --max-plies "$MAX_PLIES" \
     --max-elo-diff "$MAX_ELO_DIFF" \
     --month "$MONTH" \
-    --source-url "$DB_URL" \
+    --source-url "$SOURCE_URL" \
     --source-bytes "$MAX_BYTES"
 PIPE_RESULTS=("${PIPESTATUS[@]}")
 trap - INT
@@ -318,10 +379,14 @@ for artifact in "$RUN_OUTPUT"/*; do
     [[ -f "$artifact" ]] && mv "$artifact" "$BOOKS_DIR/"
 done
 
-if [[ $CLEAN -eq 1 ]]; then
+if [[ $CLEAN -eq 1 && $SOURCE_IS_LOCAL -eq 0 ]]; then
     rm -f "$CHUNK"
     printf 'Removed cached archive prefix.\n'
 else
-    printf 'Retained cached archive prefix: %s\n' "$CHUNK"
+    if [[ $SOURCE_IS_LOCAL -eq 1 ]]; then
+        printf 'Local source was not modified: %s\n' "$CHUNK"
+    else
+        printf 'Retained cached archive prefix: %s\n' "$CHUNK"
+    fi
 fi
 printf '%bBooks built in %s%b\n' "$GREEN" "$BOOKS_DIR" "$RESET"

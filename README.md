@@ -95,6 +95,29 @@ All important parameters can be overridden:
 
 Run `./build-books.sh --help` for the complete option list.
 
+To use an archive you already have, pass a local `.pgn.zst` path. Local source
+files are read in place and are never removed by `--clean`:
+
+```bash
+./build-books.sh --defaults \
+  --source /data/lichess_db_standard_rated_2025-06.pgn.zst \
+  --month 2025-06
+```
+
+You can also supply an HTTP(S) URL. The complete remote file is downloaded and
+cached by default. Add `--size-gb` to select only a prefix when the server
+supports HTTP range requests:
+
+```bash
+./build-books.sh --defaults \
+  --source https://example.org/lichess_games.pgn.zst \
+  --month 2025-06 \
+  --size-gb 5
+```
+
+The source must be a zstd-compressed standard-chess PGN archive. `--month` is
+still required as provenance and is included in the output filename.
+
 To change the output or persistent download-cache directory:
 
 ```bash
