@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import sys
@@ -15,6 +16,9 @@ from typing import TextIO
 import chess
 import chess.pgn
 import chess.polyglot
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from book_builder import iter_pgn_records, lightweight_headers
 
 
 def matches(headers: chess.pgn.Headers, parameters: dict[str, object]) -> bool:
@@ -56,12 +60,12 @@ def evaluate_stream(
     started = time.monotonic()
 
     with chess.polyglot.open_reader(book_path) as reader:
-        while True:
-            game = chess.pgn.read_game(stream)
-            if game is None:
-                break
+        for record in iter_pgn_records(stream):
             games_scanned += 1
-            if not matches(game.headers, parameters):
+            if not matches(lightweight_headers(record), parameters):
+                continue
+            game = chess.pgn.read_game(io.StringIO(record))
+            if game is None:
                 continue
             moves = list(game.mainline_moves())
             if len(moves) < 6:
